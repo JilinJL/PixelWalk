@@ -1,6 +1,6 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
-const {pixelate,SIZES}=require('../pixelate.js');
+const {pixelate,trimBorders,SIZES}=require('../pixelate.js');
 
 // Photo-like source: a shaded, noisy sphere with a soft anti-aliased edge.
 function sphere(W=400,H=360){
@@ -13,6 +13,22 @@ function sphere(W=400,H=360){
  }
  return {width:W,height:H,data};
 }
+// A flat, letterboxed or hand cut-out frame around one subject: an ordinary
+// screenshot, a phone capture exported with bars, or the compliant tile the
+// studio would have produced. The subject is 240x120, so a correct grid stays
+// landscape; a frame that leaks into the bounds turns it portrait instead.
+function framed(W=640,H=480,{bg=null,bar=0,box=[.3125,.375,.6875,.625]}={}){
+ const data=new Uint8ClampedArray(W*H*4);
+ const x0=Math.round(box[0]*W),y0=Math.round(box[1]*H),x1=Math.round(box[2]*W),y1=Math.round(box[3]*H);
+ for(let y=0;y<H;y++)for(let x=0;x<W;x++){
+  const i=(y*W+x)*4,subject=x>=x0&&x<x1&&y>=y0&&y<y1,edge=bar>0&&(y<bar||y>=H-bar);
+  data.set(subject?[220,120,80,255]:edge?[0,0,0,255]:bg?[bg[0],bg[1],bg[2],255]:[0,0,0,0],i);
+ }
+ return {width:W,height:H,data};
+}
+const tally=t=>{const seen=new Map();for(let i=0;i<t.data.length;i+=4)if(t.data[i+3]){const k=`${t.data[i]},${t.data[i+1]},${t.data[i+2]}`;seen.set(k,(seen.get(k)||0)+1)}
+ return [...seen].sort((a,b)=>b[1]-a[1]).map(([c,n])=>`${c}:${n}`).join(' ')};
+
 const colourAt=(t,x,y)=>{const i=(y*160+x)*4;return t.data[i+3]?`${t.data[i]},${t.data[i+1]},${t.data[i+2]}`:'clear'};
 
 for(const size of Object.keys(SIZES))test(`${size}: every art pixel is a solid ${SIZES[size].block}px block`,()=>{
@@ -55,4 +71,38 @@ test('already-pixel sprites keep crisp shapes (cat sprite style input)',()=>{
  const t=pixelate({width:W,height:W,data},'large'),seen=new Set();
  for(let i=0;i<t.data.length;i+=4)if(t.data[i+3])seen.add(t.data.slice(i,i+3).join());
  assert.ok(seen.size<=4,`flat input stays flat: ${seen.size} colours`);
+});
+
+test('letterbox bars are trimmed before the bounds step, never painted into the tile',()=>{
+ const barred=pixelate(framed(640,480,{bar:60}),'large'),clean=pixelate(framed(),'large');
+ assert.deepEqual(barred.grid,clean.grid);
+ assert.deepEqual(tally(barred),tally(clean));
+ assert.match(tally(barred),/^227,115,69:/,'the subject stays dominant');
+});
+
+test('a flat opaque background is separated and matches the same subject cut out by hand',()=>{
+ const flat=pixelate(framed(640,480,{bg:[255,255,255]}),'large'),clean=pixelate(framed(),'large');
+ assert.deepEqual(flat.grid,clean.grid);
+ assert.deepEqual(tally(flat),tally(clean));
+ assert.ok(flat.grid.cols>flat.grid.rows,'a landscape subject keeps a landscape grid');
+});
+
+test('backgrounds that cannot be separated are refused, not half trimmed',()=>{
+ const shade=vertical=>{const W=640,H=480,data=new Uint8ClampedArray(W*H*4);
+  for(let y=0;y<H;y++)for(let x=0;x<W;x++){const i=(y*W+x)*4,v=Math.round(40+(vertical?y/H:x/W)*170);
+   data.set(x>200&&x<440&&y>180&&y<300?[220,120,80,255]:[v,v,v,255],i)}
+  return {width:W,height:H,data}};
+ const blank=framed(640,480,{bg:[200,200,200],box:[0,0,0,0]});
+ for(const src of [shade(false),shade(true),blank])assert.throws(()=>pixelate(src,'large'),/透明/);
+});
+
+test('transparent margins are never trimmed, so compliant sources reach pixelate untouched',()=>{
+ assert.equal(trimBorders(sphere()),null);
+ assert.equal(trimBorders(framed()),null);
+});
+
+test('a transparent background that is simply too narrow says which problem it has',()=>{
+ const W=640,H=640,data=new Uint8ClampedArray(W*H*4);
+ for(let y=0;y<H;y++)for(let x=0;x<W;x++)data.set(x>0&&x<W-1&&y>0&&y<H-1?[120,160,210,255]:[0,0,0,0],(y*W+x)*4);
+ assert.throws(()=>pixelate({width:W,height:H,data}),/透明边距太窄/);
 });

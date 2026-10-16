@@ -40,14 +40,62 @@ function palette(samples,k){
 // Selective outline: a darker, slightly desaturated shade of the touching colour.
 const shade=([L,a,b])=>[Math.max(.08,L*.48),a*.75,b*.75];
 
+/* ---------- background ---------- */
+/* Uploads arrive with a flat opaque background, or letterboxed, and both leave
+   pixelate() unable to tell the subject from the frame: a fully opaque image
+   fails the transparency check outright, and bars inside the alpha bounds
+   stretch those bounds until the subject shrinks to a fraction of the tile.
+   Trim opaque near-uniform borders first, so the bounds step below sees roughly
+   what a hand cut-out would give it. Flat white, flat black, solid
+   colours and letterbox bars come off; gradient, textured and photographic
+   backgrounds are left alone and still fail. A uniform band that genuinely
+   spans a whole row or column of the artwork cannot be told apart from a
+   border and is trimmed with it, which is what the studio preview catches. */
+const TRIM={tolerance:12,maxTrim:.45,opaque:250};
+// One row (step 1, count W) or one column (step W, count H) of effectively one
+// opaque colour. Any partial alpha, or drift past the tolerance, ends the scan.
+function uniformLine(data,start,step,count,tolerance){
+ const r=data[start],g=data[start+1],b=data[start+2];
+ for(let i=1;i<count;i++){const o=start+i*step*4;
+  if(data[o+3]<TRIM.opaque)return false;
+  if(Math.abs(data[o]-r)>tolerance||Math.abs(data[o+1]-g)>tolerance||Math.abs(data[o+2]-b)>tolerance)return false}
+ return true;
+}
+/* Returns the cropped source, or null unless all four scans stopped at content
+   rather than at the cap. That is the evidence the remaining box is the subject
+   itself, and it is also what lets pixelate() accept a source with no
+   transparent margin left -- so a blank or near-blank frame, which only ever
+   ends at the cap, must not qualify. */
+function trimBorders(src,{tolerance=TRIM.tolerance,maxTrim=TRIM.maxTrim}={}){
+ const {width:W,height:H,data}=src,maxY=Math.floor(H*maxTrim),maxX=Math.floor(W*maxTrim);
+ let top=0;while(top<maxY&&uniformLine(data,top*W*4,1,W,tolerance))top++;
+ let bottom=0;while(bottom<maxY&&uniformLine(data,(H-1-bottom)*W*4,1,W,tolerance))bottom++;
+ let left=0;while(left<maxX&&uniformLine(data,left*4,W,H,tolerance))left++;
+ let right=0;while(right<maxX&&uniformLine(data,(W-1-right)*4,W,H,tolerance))right++;
+ if(top===maxY||bottom===maxY||left===maxX||right===maxX)return null;
+ const w=W-left-right,h=H-top-bottom;
+ if((!top&&!bottom&&!left&&!right)||w<1||h<1)return null;
+ const out=new Uint8ClampedArray(w*h*4);
+ for(let y=0;y<h;y++)for(let x=0;x<w;x++){const s=((y+top)*W+left+x)*4,d=(y*w+x)*4;
+  out[d]=data[s];out[d+1]=data[s+1];out[d+2]=data[s+2];out[d+3]=data[s+3]}
+ return {width:w,height:h,data:out};
+}
+
 /* ---------- main ---------- */
 function fail(message){const e=new Error(message);e.userFacing=true;throw e}
-function pixelate(src,size='medium'){
+function pixelate(source,size='medium'){
+ // Only a crop that shortened both axes is a box around the subject; it has no
+ // transparent margin left to measure, so the ratio below cannot apply to it.
+ // A one-axis crop still has an unbounded direction, which is exactly the
+ // letterbox case -- there the bounds step below does the separating, and the
+ // ratio keeps applying as before.
+ const src=trimBorders(source)||source;
+ const separated=src!==source&&src.width<source.width&&src.height<source.height;
  const {width:W,height:H,data}=src,cfg=SIZES[size]||SIZES.medium;
  let x0=W,y0=H,x1=-1,y1=-1,clear=0;
  for(let y=0;y<H;y++)for(let x=0;x<W;x++){const a=data[(y*W+x)*4+3];if(a<32)clear++;if(a>=128){if(x<x0)x0=x;if(x>x1)x1=x;if(y<y0)y0=y;if(y>y1)y1=y}}
  if(x1<0)fail('没有找到可见主体');
- if(clear/(W*H)<.01)fail('需要透明背景');
+ if(!separated&&clear/(W*H)<.01)fail(clear?'透明边距太窄，请给主体留出更宽的透明背景':'需要透明背景');
  const bw=x1-x0+1,bh=y1-y0+1;
  // Art grid leaves one cell on each side for the outline.
  const inner=Math.max(4,Math.floor(cfg.max/cfg.block)-2),k=inner/Math.max(bw,bh);
@@ -97,6 +145,6 @@ function pixelate(src,size='medium'){
  }
  return {width:TILE,height:TILE,data:tile,grid:{cols:gw,rows:gh,block:B},colors:colours.length};
 }
-const api={pixelate,SIZES,TILE,oklab,rgb};
+const api={pixelate,trimBorders,SIZES,TILE,oklab,rgb};
 root.PixelWalkPixelate=api;if(typeof module!=='undefined')module.exports=api;
 })(typeof window!=='undefined'?window:globalThis);
